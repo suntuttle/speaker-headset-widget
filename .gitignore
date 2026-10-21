@@ -1,0 +1,18 @@
+# Generated binaries (keep the final distributable)
+*.exe
+!SpeakerWidget.exe
+*.pdb
+bin/
+obj/
+
+# Local diagnostics and backups
+backup/
+diagnostics.txt
+devices.xml
+
+# IDE and OS files
+.vs/
+.idea/
+*.user
+.DS_Store
+Thumbs.db
