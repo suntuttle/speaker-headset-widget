@@ -7,6 +7,14 @@ using System.Linq;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Xml.Serialization;
+using System.Reflection;
+
+[assembly: AssemblyTitle("Speaker Headset Switcher")]
+[assembly: AssemblyDescription("Lightweight Windows tray audio switcher and volume controller")]
+[assembly: AssemblyCompany("suntuttle")]
+[assembly: AssemblyProduct("Speaker Headset Switcher")]
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
 
 [StructLayout(LayoutKind.Sequential)] public struct Key { public Guid fmt; public uint pid; public Key(string f,uint p){fmt=new Guid(f);pid=p;} }
 [StructLayout(LayoutKind.Explicit,Size=24)] public struct PV { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr ptr; [FieldOffset(8)] public uint number; }
@@ -19,6 +27,16 @@ using System.Xml.Serialization;
 [ComImport,Guid("F8679F50-850A-41CF-9C72-430F290290C8"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)] interface Policy {
  void GetMixFormat(); void GetDeviceFormat(); void ResetDeviceFormat(); void SetDeviceFormat(); void GetProcessingPeriod(); void SetProcessingPeriod(); void GetShareMode(); void SetShareMode(); void GetPropertyValue(); void SetPropertyValue(); void SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)]string id,int role); void SetEndpointVisibility();
 }
+[ComImport,Guid("5CDF2C82-841E-4546-9722-0CF74078229A"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)] interface EndpointVolume {
+ void RegisterControlChangeNotify(IntPtr notify); void UnregisterControlChangeNotify(IntPtr notify); void GetChannelCount(out uint count);
+ void SetMasterVolumeLevel(float level,IntPtr context); void SetMasterVolumeLevelScalar(float level,IntPtr context);
+ void GetMasterVolumeLevel(out float level); void GetMasterVolumeLevelScalar(out float level);
+ void SetChannelVolumeLevel(uint channel,float level,IntPtr context); void SetChannelVolumeLevelScalar(uint channel,float level,IntPtr context);
+ void GetChannelVolumeLevel(uint channel,out float level); void GetChannelVolumeLevelScalar(uint channel,out float level);
+ void SetMute([MarshalAs(UnmanagedType.Bool)]bool mute,IntPtr context); void GetMute([MarshalAs(UnmanagedType.Bool)]out bool mute);
+ void GetVolumeStepInfo(out uint step,out uint count); void VolumeStepUp(IntPtr context); void VolumeStepDown(IntPtr context);
+ void QueryHardwareSupport(out uint mask); void GetVolumeRange(out float min,out float max,out float increment);
+}
 public class Endpoint { public string Id,Name,Hardware; public int Kind; public override string ToString(){return Name;} }
 public class Preferences { public Endpoint Speaker; public Endpoint Headset; public bool LightTheme; }
 static class Audio {
@@ -27,6 +45,11 @@ static class Audio {
  static string Read(Props p,string guid,uint pid){PV v=new PV();try{Key k=new Key(guid,pid);p.GetValue(ref k,out v);return v.vt==31?Marshal.PtrToStringUni(v.ptr):v.vt==19?v.number.ToString():"";}finally{PropVariantClear(ref v);}}
  public static List<Endpoint> Scan(out string current){Enumerator e=null;Collection c=null;Device d=null;current=null;var list=new List<Endpoint>();try{e=(Enumerator)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")));try{e.GetDefaultAudioEndpoint(0,0,out d);d.GetId(out current);}catch(COMException){}finally{Release(d);d=null;}e.EnumAudioEndpoints(0,1,out c);uint n;c.GetCount(out n);for(uint i=0;i<n;i++){Props p=null;try{c.Item(i,out d);string id;d.GetId(out id);d.OpenPropertyStore(0,out p);int kind;int.TryParse(Read(p,"1da5d803-d492-4edd-8c23-e0c0ffee7f0e",0),out kind);list.Add(new Endpoint{Id=id,Name=Read(p,"a45c254e-df1c-4efd-8020-67d146a850e0",14),Hardware=Read(p,"026e516e-b814-414b-83cd-856d6fef4822",2),Kind=kind});}finally{Release(p);Release(d);d=null;}}return list;}finally{Release(c);Release(e);}}
  public static string DefaultId(int role){Enumerator e=null;Device d=null;try{e=(Enumerator)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")));e.GetDefaultAudioEndpoint(0,role,out d);string id;d.GetId(out id);return id;}finally{Release(d);Release(e);}} public static void SetRole(string id,int role){object o=Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")));try{((Policy)o).SetDefaultEndpoint(id,role);}finally{Release(o);}} public static void Switch(string id){object o=Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")));try{Policy p=(Policy)o;for(int role=0;role<3;role++)p.SetDefaultEndpoint(id,role);}finally{Release(o);}}
+ public static void ReadVolume(out int percent,out bool muted){int localPercent=0;bool localMuted=false;WithVolume(delegate(EndpointVolume volume){float level;volume.GetMasterVolumeLevelScalar(out level);volume.GetMute(out localMuted);localPercent=(int)Math.Round(level*100);});percent=localPercent;muted=localMuted;}
+ public static int ChangeVolume(int delta){int result=0;WithVolume(delegate(EndpointVolume volume){float level;volume.GetMasterVolumeLevelScalar(out level);level=Math.Max(0f,Math.Min(1f,level+delta/100f));volume.SetMasterVolumeLevelScalar(level,IntPtr.Zero);if(level>0)volume.SetMute(false,IntPtr.Zero);result=(int)Math.Round(level*100);});return result;}
+ public static bool ToggleMute(){bool result=false;WithVolume(delegate(EndpointVolume volume){bool muted;volume.GetMute(out muted);result=!muted;volume.SetMute(result,IntPtr.Zero);});return result;}
+ delegate void VolumeAction(EndpointVolume volume);
+ static void WithVolume(VolumeAction action){Enumerator e=null;Device d=null;object volumeObject=null;IntPtr pointer=IntPtr.Zero;try{e=(Enumerator)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")));e.GetDefaultAudioEndpoint(0,0,out d);Guid iid=new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");d.Activate(ref iid,23,IntPtr.Zero,out pointer);volumeObject=Marshal.GetObjectForIUnknown(pointer);action((EndpointVolume)volumeObject);}finally{if(pointer!=IntPtr.Zero)Marshal.Release(pointer);Release(volumeObject);Release(d);Release(e);}}
  public static string Normal(string s){return Regex.Replace((s??"").ToLowerInvariant(),@"\b\d+\s*-\s*","").Trim();}
  public static Endpoint Resolve(List<Endpoint> all,Endpoint saved,bool headset){
  if(saved!=null){var exact=all.FirstOrDefault(x=>x.Id==saved.Id);if(exact!=null)return exact;
@@ -35,9 +58,93 @@ static class Audio {
  var candidates=all.Where(x=>headset?(x.Kind==3||x.Kind==5||Regex.IsMatch(x.Name,"headset|headphone|헤드셋|헤드폰",RegexOptions.IgnoreCase)):(x.Kind==1&&!Regex.IsMatch(x.Name,"headset|headphone|헤드셋|헤드폰|streaming|virtual|가상",RegexOptions.IgnoreCase))).ToList();return candidates.Count==1?candidates[0]:null;
  }
 }
+
+sealed class TrayController : NativeWindow, IDisposable
+{
+    const uint NIM_ADD=0, NIM_MODIFY=1, NIM_DELETE=2, NIM_SETVERSION=4;
+    const uint NIF_MESSAGE=1, NIF_ICON=2, NIF_TIP=4, NIF_GUID=0x20, NIF_SHOWTIP=0x80, NOTIFYICON_VERSION_4=4;
+    const int WM_APP=0x8000, WM_CONTEXTMENU=0x007B, WM_LBUTTONUP=0x0202, WM_RBUTTONUP=0x0205, WM_MBUTTONUP=0x0208, WM_MOUSEWHEEL=0x020A, WH_MOUSE_LL=14;
+    static readonly Guid IconGuid=new Guid("716AA7A5-BB21-4FB0-84BB-90F421AC709A");
+    readonly HookProc hookProc;
+    readonly uint taskbarCreated;
+    IntPtr hook;
+    Icon icon;
+    string text="스피커 · 헤드셋 전환";
+    public event Action LeftClick,MiddleClick,RightClick;
+    public event Action<int> Wheel;
+
+    [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct NotifyData {
+        public uint cbSize; public IntPtr hWnd; public uint uID,uFlags,uCallbackMessage; public IntPtr hIcon;
+        [MarshalAs(UnmanagedType.ByValTStr,SizeConst=128)] public string szTip;
+        public uint dwState,dwStateMask;
+        [MarshalAs(UnmanagedType.ByValTStr,SizeConst=256)] public string szInfo;
+        public uint uVersion;
+        [MarshalAs(UnmanagedType.ByValTStr,SizeConst=64)] public string szInfoTitle;
+        public uint dwInfoFlags; public Guid guidItem; public IntPtr hBalloonIcon;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct Identifier { public uint cbSize; public IntPtr hWnd; public uint uID; public Guid guidItem; }
+    [StructLayout(LayoutKind.Sequential)] struct NativeRect { public int Left,Top,Right,Bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct Point { public int X,Y; }
+    [StructLayout(LayoutKind.Sequential)] struct MouseData { public Point pt; public uint mouseData,flags,time; public IntPtr extra; }
+    delegate IntPtr HookProc(int code,IntPtr message,IntPtr data);
+    [DllImport("shell32.dll",CharSet=CharSet.Unicode)] static extern bool Shell_NotifyIcon(uint message,ref NotifyData data);
+    [DllImport("shell32.dll")] static extern int Shell_NotifyIconGetRect(ref Identifier identifier,out NativeRect rect);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern uint RegisterWindowMessage(string name);
+    [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id,HookProc callback,IntPtr module,uint thread);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hook);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook,int code,IntPtr message,IntPtr data);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+
+    public TrayController()
+    {
+        CreateHandle(new CreateParams());
+        taskbarCreated=RegisterWindowMessage("TaskbarCreated");
+        hookProc=MouseHook;
+        hook=SetWindowsHookEx(WH_MOUSE_LL,hookProc,GetModuleHandle(null),0);
+    }
+    public void Update(Icon next,string tooltip)
+    {
+        Icon previous=icon; icon=next; text=string.IsNullOrEmpty(tooltip)?"스피커 · 헤드셋 전환":tooltip;
+        NotifyData data=Data();
+        if(!Shell_NotifyIcon(NIM_MODIFY,ref data)) Add();
+        if(previous!=null)previous.Dispose();
+    }
+    void Add()
+    {
+        NotifyData data=Data(); Shell_NotifyIcon(NIM_ADD,ref data);
+        data.uVersion=NOTIFYICON_VERSION_4; Shell_NotifyIcon(NIM_SETVERSION,ref data);
+    }
+    NotifyData Data(){return new NotifyData{cbSize=(uint)Marshal.SizeOf(typeof(NotifyData)),hWnd=Handle,uID=1,uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP|NIF_GUID|NIF_SHOWTIP,uCallbackMessage=WM_APP+41,hIcon=icon==null?SystemIcons.Application.Handle:icon.Handle,szTip=text.Length>127?text.Substring(0,127):text,guidItem=IconGuid};}
+    protected override void WndProc(ref Message message)
+    {
+        if(message.Msg==taskbarCreated){Add();return;}
+        if(message.Msg==WM_APP+41){int action=(int)((long)message.LParam&0xffff);if(action==WM_LBUTTONUP&&LeftClick!=null)LeftClick();else if(action==WM_MBUTTONUP&&MiddleClick!=null)MiddleClick();else if((action==WM_RBUTTONUP||action==WM_CONTEXTMENU)&&RightClick!=null)RightClick();return;}
+        base.WndProc(ref message);
+    }
+    IntPtr MouseHook(int code,IntPtr message,IntPtr data)
+    {
+        if(code>=0&&(int)message==WM_MOUSEWHEEL&&Wheel!=null)
+        {
+            MouseData mouse=(MouseData)Marshal.PtrToStructure(data,typeof(MouseData));
+            Identifier id=new Identifier{cbSize=(uint)Marshal.SizeOf(typeof(Identifier)),hWnd=Handle,uID=1,guidItem=IconGuid};
+            NativeRect native;
+            if(Shell_NotifyIconGetRect(ref id,out native)==0&&Rectangle.FromLTRB(native.Left,native.Top,native.Right,native.Bottom).Contains(mouse.pt.X,mouse.pt.Y))
+            {short delta=unchecked((short)(mouse.mouseData>>16));if(delta!=0)Wheel(delta>0?1:-1);return new IntPtr(1);}
+        }
+        return CallNextHookEx(hook,code,message,data);
+    }
+    public void Dispose()
+    {
+        NotifyData data=Data();Shell_NotifyIcon(NIM_DELETE,ref data);
+        if(hook!=IntPtr.Zero){UnhookWindowsHookEx(hook);hook=IntPtr.Zero;}
+        if(icon!=null){icon.Dispose();icon=null;}
+        DestroyHandle();
+    }
+}
+
 class Widget : Form
 {
-    readonly NotifyIcon tray = new NotifyIcon();
+    readonly TrayController tray = new TrayController();
     readonly System.Threading.EventWaitHandle restore = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset, Program.InstanceName + "Restore");
     readonly ToolTip tip = new ToolTip { InitialDelay = 550, ReshowDelay = 150, AutoPopDelay = 6000 };
     readonly Timer timer = new Timer();
@@ -81,17 +188,13 @@ class Widget : Form
         menu.Opening += (s, e) => { collapseTimer.Stop(); BuildMenu(menu); };
         menu.Closed += (s, e) => { if (expanded) collapseTimer.Start(); };
         collapseTimer.Tick += (s, e) => TryCollapse();
-        ContextMenuStrip = menu;
-        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-        tray.Icon = Icon;
-        tray.Text = "스피커 · 헤드셋 전환";
-        tray.ContextMenuStrip = menu;
-        tray.Visible = true;
-        tray.DoubleClick += (s, e) => RestoreWidget();
+        tray.LeftClick += Toggle;
+        tray.MiddleClick += ToggleMute;
+        tray.RightClick += ShowTrayMenu;
+        tray.Wheel += AdjustVolume;
         timer.Interval = 3000;
-        timer.Tick += (s, e) => { if (restore.WaitOne(0)) RestoreWidget(); RefreshState(); };
-        backdropTimer.Tick += (s, e) => UpdateBackdrop();
-        Shown += (s, e) => { RestoreWidget(); RefreshState(); timer.Start(); UpdateBackdrop(); backdropTimer.Start(); };
+        timer.Tick += (s, e) => { restore.WaitOne(0); RefreshState(); };
+        Shown += (s, e) => { Hide(); RefreshState(); timer.Start(); };
     }
 
     bool Light { get { return prefs.LightTheme; } }
@@ -163,6 +266,32 @@ class Widget : Form
                 g.DrawArc(p, x + 7, y + 1, 15, 18, -50, 100);
             }
         }
+    }
+    Icon MakeTrayIcon(bool headphones,bool muted)
+    {
+        using(var bitmap=new Bitmap(32,32))
+        using(var graphics=Graphics.FromImage(bitmap))
+        {
+            graphics.SmoothingMode=System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            graphics.Clear(Color.Transparent);
+            Color color=!available?Color.FromArgb(150,150,150):headphones?Color.FromArgb(184,157,229):Color.FromArgb(112,194,163);
+            DrawDeviceIcon(graphics,headphones,color,5,6);
+            if(muted)using(var pen=new Pen(Color.FromArgb(235,100,105),2.3f)){pen.StartCap=pen.EndCap=System.Drawing.Drawing2D.LineCap.Round;graphics.DrawLine(pen,6,25,26,5);}
+            IntPtr handle=bitmap.GetHicon();
+            try{return (Icon)Icon.FromHandle(handle).Clone();}finally{DestroyIcon(handle);}
+        }
+    }
+    [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr icon);
+    void ShowTrayMenu(){menu.Show(Cursor.Position);}
+    void AdjustVolume(int direction)
+    {
+        try{Audio.ChangeVolume(direction*5);RefreshState();}
+        catch(Exception ex){MessageBox.Show("볼륨을 조절하지 못했습니다: "+ex.Message,Text);}
+    }
+    void ToggleMute()
+    {
+        try{Audio.ToggleMute();RefreshState();}
+        catch(Exception ex){MessageBox.Show("음소거를 전환하지 못했습니다: "+ex.Message,Text);}
     }
     protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hover = true; collapseTimer.Stop(); Invalidate(); }
     protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hover = pressed = false; if (expanded) collapseTimer.Start(); Invalidate(); }
@@ -241,8 +370,9 @@ class Widget : Form
             string nextTip = (active == null ? "출력 장치 없음" : active.Name) + "\n" + (!expanded ? "클릭 → 위젯 펼치기" : speaker == null || headset == null ? "우클릭 → 스피커 / 헤드셋 지정" : "클릭 → " + (isHeadset ? "스피커" : "헤드셋") + "로 전환") + "\n우클릭: 설정";
             if (tooltip != nextTip) { tooltip = nextTip; tip.SetToolTip(this, tooltip); }
             AccessibleName = heading + ", " + caption + (expanded ? ", 출력 전환" : ", 위젯 펼치기");
-            tray.Text = "출력: " + heading + " · 더블클릭으로 위젯 표시";
-            Position();
+            int volume;bool muted;Audio.ReadVolume(out volume,out muted);
+            string volumeTip=(active==null?"출력 장치 없음":active.Name)+": "+volume+"%"+(muted?" (음소거)":"");
+            tray.Update(MakeTrayIcon(isHeadset,muted),volumeTip);
         }
         catch (Exception ex) { heading = "연결 확인"; caption = "잠시 후 다시 확인합니다"; available = false; tip.SetToolTip(this, ex.Message); }
         if (oldHeading != heading || oldCaption != caption || oldHeadset != isHeadset || oldAvailable != available) Invalidate();
@@ -279,12 +409,6 @@ class Widget : Form
         }
         target.Items.Add("자동 인식으로 초기화", null, (s, e) => { prefs.Speaker = prefs.Headset = null; Save(); RefreshState(); });
         target.Items.Add(new ToolStripSeparator());
-        var light = new ToolStripMenuItem("밝은 테마") { Checked = Light };
-        light.Click += (s, e) => { prefs.LightTheme = !Light; Save(); ApplyTheme(); };
-        target.Items.Add(light);
-        var top = new ToolStripMenuItem("항상 위에 표시") { Checked = true, Enabled = false };
-
-        target.Items.Add(top);
         target.Items.Add("Windows 소리 설정", null, (s, e) => System.Diagnostics.Process.Start("ms-settings:sound"));
         target.Items.Add(new ToolStripSeparator());
         target.Items.Add("종료", null, (s, e) => Close());
@@ -293,7 +417,7 @@ class Widget : Form
     {
         if (disposing)
         {
-            timer.Dispose(); backdropTimer.Dispose(); collapseTimer.Dispose(); tip.Dispose(); tray.Visible = false; tray.Dispose(); restore.Dispose();
+            timer.Dispose(); backdropTimer.Dispose(); collapseTimer.Dispose(); tip.Dispose(); tray.Dispose(); restore.Dispose();
             headingFont.Dispose(); captionFont.Dispose(); if (menu != null) menu.Dispose();
         }
         base.Dispose(disposing);
