@@ -1,0 +1,94 @@
+name: Sign Windows release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  sign:
+    name: Build and sign
+    runs-on: windows-latest
+    env:
+      SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+      SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+      SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+
+    steps:
+      - name: Require a release tag
+        shell: pwsh
+        run: |
+          if ('${{ github.ref_type }}' -ne 'tag') {
+            throw 'Run this workflow from a release tag, for example v1.0.1.'
+          }
+
+      - name: Check out the tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check SignPath configuration
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          $required = @(
+            'SIGNPATH_API_TOKEN',
+            'SIGNPATH_ORGANIZATION_ID',
+            'SIGNPATH_PROJECT_SLUG',
+            'SIGNPATH_SIGNING_POLICY_SLUG'
+          )
+          $missing = $required.Where({ [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
+          if ($missing.Count) {
+            throw "Missing repository secrets or variables: $($missing -join ', ')"
+          }
+
+      - name: Build
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: Upload unsigned artifact
+        id: upload-unsigned
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unsigned-speaker-widget
+          path: SpeakerWidget.exe
+          if-no-files-found: error
+
+      - name: Submit signing request
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Verify Authenticode signature
+        shell: pwsh
+        run: |
+          $binary = Resolve-Path .\signed\SpeakerWidget.exe
+          $signature = Get-AuthenticodeSignature -LiteralPath $binary
+          if ($signature.Status -ne 'Valid') {
+            throw "Invalid Authenticode signature: $($signature.Status) $($signature.StatusMessage)"
+          }
+          Write-Host "Signed by: $($signature.SignerCertificate.Subject)"
+
+      - name: Create release package
+        shell: pwsh
+        run: |
+          $package = 'Speaker-Headset-Switcher-${{ github.ref_name }}-win-x64.zip'
+          New-Item -ItemType Directory -Path package | Out-Null
+          Copy-Item .\signed\SpeakerWidget.exe, .\README.md, .\사용방법.md, .\LICENSE package\
+          Compress-Archive -Path package\* -DestinationPath $package
+          Get-FileHash $package -Algorithm SHA256 | Format-List
+
+      - name: Upload signed package to the GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $package = 'Speaker-Headset-Switcher-${{ github.ref_name }}-win-x64.zip'
+          gh release upload '${{ github.ref_name }}' $package --clobber
